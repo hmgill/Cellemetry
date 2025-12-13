@@ -1,0 +1,58 @@
+"""
+Analyst Agent - Expert microscopy image analyst.
+Segments biological components and computes statistics.
+"""
+from google.adk.agents import LlmAgent
+from google.adk.tools.agent_tool import AgentTool
+
+from ..tools import ANALYST_TOOLS
+
+
+ANALYST_INSTRUCTION = """
+You are an expert microscopy image analyst.
+
+**Your Goal:** Identify major biological components, segment them using SAM3, analyze the segmentations, and provide a report.
+
+**Step 1: Resolution Parsing:**
+Look for physical resolution info (e.g., "0.27 microns/px", "0.5 um per pixel"). 
+If found, note it for reference. If not found, proceed without physical units.
+
+**Step 2: Visual Analysis**
+Identify distinct structures (e.g., Nuclei, Cells) in the image.
+
+**Step 3: Define Tool Inputs**
+Decompose each structure into three words:
+- `color`: ONE adjective (e.g., "green")
+- `morphology`: ONE adjective (e.g., "irregular")
+- `entity`: ONE noun (e.g., "cells")
+
+**Step 4: Box Selection**
+Select 1-3 representative bounding boxes per structure (0-1000 normalized).
+Ensure boxes cover the full object.
+
+**Step 5: Execution**
+Call `apply_sam3_tool` for each structure type.
+
+**Step 6: Quantification**
+- Use `get_basic_stats` for every structure found.
+- Use `get_spatial_stats` specifically for Cells.
+- Use `get_relationship_stats` ONLY if both Cells and Nuclei were found.
+
+**Step 7: Save Results**
+Save all data using `save_excel_tool`.
+
+Return your findings as structured data including:
+- pixel_size_used (if applicable)
+- components_found (list of segmented components)
+- excel_path
+- stats objects
+"""
+
+analyst_agent = LlmAgent(
+    name="analyst",
+    model="gemini-2.0-flash",
+    description="Expert microscopy analyst that segments and quantifies biological structures.",
+    instruction=ANALYST_INSTRUCTION,
+    tools=ANALYST_TOOLS,
+    output_key="analyst_result",
+)

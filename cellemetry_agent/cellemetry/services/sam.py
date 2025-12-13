@@ -1,0 +1,173 @@
+"""
+SAM3 segmentation execution.
+Core logic unchanged from original - just updated imports.
+"""
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import torch
+import torchvision
+import numpy as np
+from PIL import Image
+from skimage.measure import regionprops
+
+from ..config.schemas import ComponentRequest
+from ..config.dependencies import AnalysisDeps
+
+MIN_SOLIDITY = 0.50
+MIN_CIRCULARITY = 0.1
+
+# Use /tmp for all outputs (Cloud Run writable directory)
+OUTPUT_DIR = "/tmp"
+
+
+def execute_segmentation(deps: AnalysisDeps, request: ComponentRequest) -> str:
+    """
+    Execute SAM3 segmentation for the given component request.
+    
+    Args:
+        deps: Analysis dependencies with SAM model
+        request: Component request with color, morphology, entity, bboxes
+    
+    Returns:
+        String describing results and output filenames
+    """
+    text_prompt = f"{request.color} {request.morphology} {request.entity}"
+    print(f"\n[Engine] Segmenting: '{text_prompt}' ({len(request.bboxes)} boxes).")
+
+    # Load Image
+    try:
+        raw_image = Image.open(deps.image_path).convert("RGB")
+    except Exception as e:
+        return f"Error loading image: {e}"
+
+    width, height = raw_image.size
+
+    # Convert normalized coords (0-1000) to pixel coords
+    sam_input_boxes = []
+    for box in request.bboxes:
+        y_min = (box.ymin / 1000) * height
+        x_min = (box.xmin / 1000) * width
+        y_max = (box.ymax / 1000) * height
+        x_max = (box.xmax / 1000) * width
+        sam_input_boxes.append([x_min, y_min, x_max, y_max])
+
+    if not sam_input_boxes:
+        return "No valid boxes provided."
+
+    # Generate consistent filename from request
+    safe_label = f"{request.color}_{request.entity}".replace(" ", "_").lower()
+    plot_filename = f"/tmp/out_{safe_label}.png"
+    data_filename = f"/tmp/data_{safe_label}.npz"
+    
+    # Check if SAM model is available
+    if deps.sam_model is None or deps.sam_processor is None:
+        # Return mock result for testing
+        return f"[Mock] Would segment '{text_prompt}'. SAM model not loaded. Data file would be: {data_filename}"
+
+    # Prepare inputs
+    sam_input_labels = [[1] * len(sam_input_boxes)]
+    input_boxes_batch = [sam_input_boxes]
+
+    inputs = deps.sam_processor(
+        images=raw_image,
+        text=text_prompt,
+        input_boxes=input_boxes_batch,
+        input_boxes_labels=sam_input_labels,
+        return_tensors="pt"
+    ).to(deps.device)
+
+    if deps.device == "cuda":
+        inputs = {
+            k: v.half() if isinstance(v, torch.Tensor) and v.dtype.is_floating_point else v 
+            for k, v in inputs.items()
+        }
+        
+    with torch.no_grad():
+        outputs = deps.sam_model(**inputs)
+
+    results = deps.sam_processor.post_process_instance_segmentation(
+        outputs,
+        threshold=0.3,
+        target_sizes=inputs["original_sizes"].tolist()
+    )[0]
+
+    # Morphology filtering
+    keep_indices_morph = []
+    for i, mask_tensor in enumerate(results["masks"]):
+        mask_np = mask_tensor.cpu().numpy()
+        mask_np = np.squeeze(mask_np).astype(int)
+
+        if mask_np.ndim != 2:
+            keep_indices_morph.append(False)
+            continue
+
+        props = regionprops(mask_np)
+        if not props:
+            keep_indices_morph.append(False)
+            continue
+
+        prop = props[0]
+        perimeter = prop.perimeter
+        circularity = (4 * np.pi * prop.area) / (perimeter ** 2) if perimeter > 0 else 0
+
+        is_solid = prop.solidity > MIN_SOLIDITY
+        is_round_enough = circularity > MIN_CIRCULARITY
+        keep_indices_morph.append(is_solid and is_round_enough)
+
+    if any(keep_indices_morph):
+        keep_indices_tensor = torch.tensor(keep_indices_morph, device=results["masks"].device)
+        before_count = len(results["masks"])
+        results = _filter_results(results, keep_indices_tensor)
+        print(f"[Filter] Morphology: Dropped {before_count - len(results['masks'])} debris-like objects.")
+
+    # NMS
+    pred_boxes = results["boxes"]
+    pred_scores = results["scores"]
+
+    if len(pred_scores) > 1:
+        keep_indices_nms = torchvision.ops.nms(pred_boxes, pred_scores, iou_threshold=0.3)
+        results = _filter_results(results, keep_indices_nms)
+        print(f"[NMS] Reduced masks from {len(pred_scores)} to {len(keep_indices_nms)}")
+
+    # Save outputs
+    _save_plot(raw_image, results, sam_input_boxes, text_prompt, plot_filename)
+
+    mask_count = len(results['masks'])
+    if mask_count > 0:
+        masks_list = [m.cpu().numpy().squeeze() for m in results['masks']]
+        masks_array = np.array(masks_list)
+        np.savez_compressed(data_filename, masks=masks_array)
+    else:
+        np.savez_compressed(data_filename, masks=np.array([]))
+
+    print(f"[Engine] Saved {mask_count} masks to {data_filename}")
+    
+    # Return with EXACT filename for stats tools to use
+    return f"SUCCESS: Found {mask_count} '{text_prompt}' objects. MASK_FILE={data_filename} PLOT_FILE={plot_filename}"
+
+
+def _filter_results(results, keep_indices):
+    """Helper to slice all dictionary keys at once."""
+    results["masks"] = results["masks"][keep_indices]
+    results["scores"] = results["scores"][keep_indices]
+    results["boxes"] = results["boxes"][keep_indices]
+    return results
+
+
+def _save_plot(image, results, boxes, label, filename):
+    """Save visualization of segmentation results."""
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.imshow(image)
+
+    for mask, score in zip(results['masks'], results['scores']):
+        if score > 0.3:
+            mask_np = mask.cpu().numpy()
+            color = np.concatenate([np.random.random(3), np.array([0.5])], axis=0)
+            h, w = mask_np.shape[-2:]
+            ax.imshow(mask_np.reshape(h, w, 1) * color.reshape(1, 1, -1))
+
+    ax.set_title(f"{label}")
+    ax.axis('off')
+    fig.savefig(filename)
+    plt.close(fig)

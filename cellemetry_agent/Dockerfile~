@@ -1,0 +1,48 @@
+FROM python:3.10-slim
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Accept HF token as build arg
+ARG HF_TOKEN
+
+# 1. Setup the environment
+WORKDIR /app
+ENV PYTHONPATH="${PYTHONPATH}:/app"
+ENV HF_HOME=/app/models
+
+# 2. Install dependencies
+RUN apt-get update && apt-get install -y \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN uv pip install --system --no-cache -r requirements.txt
+
+# 3. Pre-download SAM3 model with authentication
+# Login to HuggingFace first, then download
+RUN if [ -n "$HF_TOKEN" ]; then \
+        python -c "from huggingface_hub import login; login(token='${HF_TOKEN}'); print('Logged in to HuggingFace')"; \
+    fi && \
+    python -c "from transformers import Sam3Model, Sam3Processor; \
+        print('Downloading SAM3 model...'); \
+        Sam3Model.from_pretrained('facebook/sam3'); \
+        Sam3Processor.from_pretrained('facebook/sam3'); \
+        print('SAM3 model cached successfully!')"
+
+# 4. Set offline mode for runtime
+ENV HF_HUB_OFFLINE=1
+
+# 5. Copy application code
+COPY . .
+
+# 6. Expose the port
+ENV PORT=8080
+EXPOSE 8080
+
+# 7. Run the server
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080"]
