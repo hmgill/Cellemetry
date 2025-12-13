@@ -1,4 +1,0 @@
-streaming logs from project-30380897-d50e-4cb6-b3d
-2025-12-13 20:18:11 2025-12-13 20:18:11,587 - INFO - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent "HTTP/1.1 200 OK"
-2025-12-13 20:18:11 2025-12-13 20:18:11,589 - INFO - Response received from the model.
- log streaming is shutting down...
