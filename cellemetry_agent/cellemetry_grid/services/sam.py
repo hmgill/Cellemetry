@@ -1,0 +1,167 @@
+"""
+SAM3 segmentation execution - Optimized & Simplified.
+Removed morphological filtering for maximum recall and speed.
+"""
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from skimage.measure import regionprops
+import torch
+import torchvision
+import numpy as np
+import time
+from PIL import Image
+
+from ..config.schemas import ComponentRequest
+from ..config.dependencies import AnalysisDeps
+
+def execute_segmentation(deps: AnalysisDeps, request: ComponentRequest):
+    """
+    Execute SAM3 segmentation for the given component request.
+    
+    Returns:
+        tuple: (count, mask_full_path, plot_full_path)
+    """
+    t_start = time.time()
+    
+    text_prompt = f"individual {request.color} {request.entity}"
+    print(f"\n[Engine] Segmenting: '{text_prompt}' ({len(request.bboxes)} boxes).")
+
+    # 1. Setup Paths using central Dependency manager
+    safe_label = f"{request.entity}".replace(" ", "_").lower()
+    plot_path = deps.get_output_path(f"out_{safe_label}.png")
+    mask_path = deps.get_output_path(f"data_{safe_label}.npz")
+
+    # 2. Load Image
+    try:
+        raw_image = Image.open(deps.image_path).convert("RGB")
+    except Exception as e:
+        raise RuntimeError(f"Error loading image: {e}")
+
+    # 3. Size Handling (Modified: No Downscaling)
+    w, h = raw_image.size
+    print(f"[Engine] Processing full resolution image: {w}x{h}")
+
+    # 4. Convert normalized coords (0-1000) to pixel coords
+    sam_input_boxes = []
+    for box in request.bboxes:
+        y_min = (box.ymin / 1000) * h
+        x_min = (box.xmin / 1000) * w
+        y_max = (box.ymax / 1000) * h
+        x_max = (box.xmax / 1000) * w
+        sam_input_boxes.append([x_min, y_min, x_max, y_max])
+
+    if not sam_input_boxes:
+        raise ValueError("No valid boxes provided.")
+
+    if deps.sam_model is None or deps.sam_processor is None:
+        print("[Mock] Would segment '{text_prompt}'. Returning dummy paths.")
+        return 0, mask_path, plot_path
+
+    # 5. Inference
+    print("[Engine] Running Inference...")
+    t_inf = time.time()
+    
+    sam_input_labels = [[1] * len(sam_input_boxes)]
+    input_boxes_batch = [sam_input_boxes]
+
+    inputs = deps.sam_processor(
+        images=raw_image,
+        text=text_prompt,
+        input_boxes=input_boxes_batch,
+        input_boxes_labels=sam_input_labels,
+        return_tensors="pt"
+    ).to(deps.device)
+
+    with torch.inference_mode():
+        outputs = deps.sam_model(**inputs)
+
+    results = deps.sam_processor.post_process_instance_segmentation(
+        outputs,
+        threshold=0.3,
+        target_sizes=inputs["original_sizes"].tolist()
+    )[0]
+    
+    print(f"[Engine] Inference took {time.time() - t_inf:.2f}s")
+
+    # 6. NMS (Remove duplicate detections)
+    pred_boxes = results["boxes"]
+    pred_scores = results["scores"]
+    if len(pred_scores) > 1:
+        keep_indices_nms = torchvision.ops.nms(pred_boxes, pred_scores, iou_threshold=0.3)
+        results = _filter_results(results, keep_indices_nms)
+
+    # 7. Save outputs
+    _save_plot(raw_image, results, sam_input_boxes, text_prompt, plot_path)
+
+    mask_count = len(results['masks'])
+    if mask_count > 0:
+        masks_list = [m.cpu().numpy().squeeze() for m in results['masks']]
+        masks_array = np.array(masks_list)
+        np.savez_compressed(mask_path, masks=masks_array)
+    else:
+        np.savez_compressed(mask_path, masks=np.array([]))
+
+    total_time = time.time() - t_start
+    print(f"[Engine] ✅ Done in {total_time:.2f}s. Saved {mask_count} masks.")
+    
+    return mask_count, mask_path, plot_path
+
+
+def _filter_results(results, keep_indices):
+    """Helper to slice all dictionary keys at once."""
+    results["masks"] = results["masks"][keep_indices]
+    results["scores"] = results["scores"][keep_indices]
+    results["boxes"] = results["boxes"][keep_indices]
+    return results
+
+
+def _save_plot(image, results, boxes, label, filename):
+    """Save visualization of segmentation results with bounding boxes and normalized grid."""
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.imshow(image)
+    
+    H, W = (image.height, image.width)
+
+    # 1. Draw Normalized Grid (for verification)
+    grid_color = 'white'
+    grid_alpha = 0.3
+    for i in range(0, 1001, 100):
+        # Vertical lines (X)
+        x = (i / 1000) * W
+        ax.axvline(x=x, color=grid_color, linestyle='-', linewidth=0.5, alpha=grid_alpha)
+        # Horizontal lines (Y)
+        y = (i / 1000) * H
+        ax.axhline(y=y, color=grid_color, linestyle='-', linewidth=0.5, alpha=grid_alpha)
+
+    # 2. Draw Segmentation Masks
+    if len(results['scores']) > 0:
+        mask_h, mask_w = results['masks'][0].shape[-2:]
+        composite = np.zeros((mask_h, mask_w, 4))
+        
+        for mask, score in zip(results['masks'], results['scores']):
+            if score > 0.3:
+                m = mask.cpu().numpy().squeeze()
+                color = np.random.random(3)
+                for c in range(3):
+                    composite[:, :, c] = np.maximum(composite[:, :, c], m * color[c])
+                composite[:, :, 3] = np.maximum(composite[:, :, 3], m * 0.5)
+        
+        ax.imshow(composite)
+
+    ax.axis('off')
+
+    # 3. Draw Bounding Boxes
+    for box in boxes:
+        x_min, y_min, x_max, y_max = box
+        width = x_max - x_min
+        height = y_max - y_min
+        rect = patches.Rectangle(
+            (x_min, y_min), width, height, 
+            linewidth=2, edgecolor='red', facecolor='none', linestyle='--'
+        )
+        ax.add_patch(rect)
+    
+    fig.savefig(filename, bbox_inches='tight', pad_inches=0)
+    plt.close(fig)

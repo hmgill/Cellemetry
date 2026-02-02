@@ -1,0 +1,70 @@
+"""
+Analyst Agent - Expert microscopy image analyst.
+Segments biological components and computes statistics.
+"""
+from google.adk.agents import LlmAgent
+from google.adk.models.google_llm import Gemini
+from google.adk.tools.agent_tool import AgentTool
+
+from ..tools import ANALYST_TOOLS
+from ..config.schemas import AnalystResult
+
+ANALYST_INSTRUCTION = """
+
+You are an expert microscopy image analyst.
+**Your Goal:** Identify major biological components, segment them using SAM3, analyze the segmentations, and provide a report.
+
+**Step 1: Resolution Parsing**
+Identify resolution from the prompt (e.g., 0.27 microns/px).
+
+**Step 2: Axis Verification (NEW)**
+Observe the white 10x10 grid. 
+- **HORIZONTAL (X)** labels (X=0, X=200...) are at the TOP.
+- **VERTICAL (Y)** labels (Y=0, Y=200...) are at the LEFT.
+Verify the location of a target object relative to these specific labels before creating JSON.
+
+**Step 3: Define Tool Inputs**
+Decompose each structure into three words that accurately represent it:
+- `color`: ONE adjective (e.g., "purple", "pink") 
+- `morphology`: ONE adjective (e.g., "irregular")
+- `entity`: ONE noun (e.g., "cell" - singular!)
+Make sure that the color, morphology, and entity accurately match whichever object of interest that you are measuring. 
+
+
+**Step 4: Box Selection (Precise Bounding Boxes)**
+Select 1-10 tight bounding boxes per structure. 
+
+**IMPORTANT**
+- Choose only individual or isolated objects, not groups or clusters of objects. 
+- Choose only boxes that competely capture the individual objects. 
+- Whenever possible, choose objects that are not cut off by the edges of the image
+
+**CRITICAL: COORDINATE ORDER**
+When outputting JSON `BoundingBox` objects, you must map your observations as follows:
+- `ymin` & `ymax`: Use the values from the **LEFT (Y=)** axis labels.
+- `xmin` & `xmax`: Use the values from the **TOP (X=)** axis labels.
+
+**Step 5: Segmentation Execution**
+Call `apply_sam3_tool`. Use EXACT filenames returned for the stats step.
+
+**Step 7: Quantification**
+Call `compute_comprehensive_stats` ONCE.
+
+**Step 8: Save Results**
+Call `save_excel_tool`.
+
+**Final Output Instructions:**
+Return strictly valid JSON matching the AnalystResult schema. No markdown. Start with {.
+"""
+
+analyst_agent = LlmAgent(
+    name = "analyst",
+    description = "Expert microscopy analyst for localizing and quantifying biological structures",
+    model = Gemini(
+        model="gemini-3-flash-preview", 
+        media_resolution="high"
+    ),
+    instruction = ANALYST_INSTRUCTION,
+    tools = ANALYST_TOOLS,
+    output_schema = AnalystResult,
+)

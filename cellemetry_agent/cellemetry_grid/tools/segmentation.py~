@@ -1,0 +1,71 @@
+"""
+Segmentation tools using SAM3.
+"""
+from typing import List
+from google.adk.tools.tool_context import ToolContext
+
+from ..config.dependencies import get_deps_from_state
+from ..config.schemas import ComponentRequest, BoundingBox, SegmentationResult
+from ..services import sam
+
+
+def apply_sam3_tool(
+    entity: str,
+    color: str,
+    morphology: str,
+    bboxes: List[BoundingBox],
+    tool_context: ToolContext
+) -> SegmentationResult:
+    """
+    Segment biological components using SAM3. Saves outputs to the run folder.
+    
+    Args:
+        entity: Object name (e.g., 'cell', 'nucleus') - use SINGULAR form
+        color: Color adjective (e.g., 'green', 'blue', 'pink')
+        morphology: Shape adjective (e.g., 'irregular', 'round')
+        bboxes: List of BoundingBox objects defining the regions of interest.
+        tool_context: Automatically injected by ADK
+    
+    Returns:
+        SegmentationResult object containing count and paths.
+    """
+    deps = get_deps_from_state(tool_context.state)
+    
+    # Check if bboxes list is empty
+    if not bboxes:
+        return SegmentationResult(
+            label=f"{color} {morphology} {entity}",
+            count=0,
+            mask_file="",
+            plot_file="",
+            result_message="ERROR: No valid bounding boxes provided"
+        )
+    
+    # Construct request directly (bboxes are already BoundingBox objects)
+    request = ComponentRequest(
+        entity=entity,
+        color=color,
+        morphology=morphology,
+        bboxes=bboxes
+    )
+    
+    # Execute Service
+    try:
+        count, mask_path, plot_path = sam.execute_segmentation(deps, request)
+        msg = f"SUCCESS: Found {count} objects."
+    except Exception as e:
+        return SegmentationResult(
+            label=f"{entity}",
+            count=0,
+            mask_file="",
+            plot_file="",
+            result_message=f"Segmentation failed: {str(e)}"
+        )
+    
+    return SegmentationResult(
+        label=f"{color} {morphology} {entity}",
+        count=count,
+        mask_file=mask_path,
+        plot_file=plot_path,
+        result_message=msg
+    )

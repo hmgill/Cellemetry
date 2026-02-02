@@ -1,0 +1,54 @@
+"""
+Statistical analysis tools for morphology and spatial metrics.
+"""
+from typing import Optional
+from google.adk.tools.tool_context import ToolContext
+
+from ..services import analysis
+
+
+def compute_comprehensive_stats(
+    cell_file: Optional[str] = None,
+    nuc_file: Optional[str] = None,
+    tool_context: ToolContext = None
+) -> dict:
+    """
+    Calculate morphology, spatial, and relational statistics in a single pass.
+    
+    Args:
+        cell_file: Path to the .npz mask file for Cells (optional)
+        nuc_file: Path to the .npz mask file for Nuclei (optional)
+        tool_context: Automatically injected by ADK
+    
+    Returns:
+        Nested dict containing 'cell_stats', 'nuc_stats', 'spatial_stats', 
+        and 'relational_stats' where applicable.
+    """
+    pixel_scale = tool_context.state.get("app:pixel_size_microns")
+    results = {}
+
+    # 1. Analyze Cells (Morphology + Spatial)
+    if cell_file:
+        # Basic stats
+        results["cell_stats"] = analysis.get_basic_stats(
+            cell_file, pixel_scale=pixel_scale
+        )
+        # Spatial stats (only relevant for cells usually, but can be adapted)
+        results["spatial_stats"] = analysis.get_spatial_stats(
+            cell_file, pixel_scale=pixel_scale
+        )
+    
+    # 2. Analyze Nuclei (Morphology only)
+    if nuc_file:
+        results["nuc_stats"] = analysis.get_basic_stats(
+            nuc_file, pixel_scale=pixel_scale
+        )
+
+    # 3. Analyze Relationships (Overlap)
+    # Only possible if we have both files
+    if cell_file and nuc_file:
+        results["relational_stats"] = analysis.analyze_relationships(
+            cell_file, nuc_file
+        )
+
+    return results

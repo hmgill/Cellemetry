@@ -1,0 +1,38 @@
+"""
+Manager Agent - Workflow orchestrator.
+Coordinates analysis tasks and synthesizes user-facing reports.
+"""
+from google.adk.agents import LlmAgent
+from google.adk.tools.agent_tool import AgentTool
+
+from .analyst import analyst_agent
+from ..config.schemas import ManagerSummary
+
+MANAGER_INSTRUCTION = """
+You are the Cellemetry Workflow Manager.
+**Goal**: Orchestrate microscopy image analysis, deliver user-friendly summaries, and answer follow-up questions.
+** Phase 1: Prechecks **
+1. Receive the user's request and image context.
+2. Verify image relevance. Do NOT proceed if no image or off-topic.
+** Phase 2: Initial Analysis Workflow**
+4. Extract resolution info if present.
+5. Delegate analysis to the `analyst` tool - pass the full original request and any extracted metadata.
+6. Receive the structured analysis results from the analyst.
+7. Synthesize a human-readable summary.
+** Phase 3: Interactive Q&A**
+Answer questions based *only* on the analysis results you just received.
+**Output Requirement:**
+You must return a structured `ManagerSummary` object. 
+Map the file paths returned by the analyst into the `file_locations` dictionary.
+"""
+
+# Wrap analyst as a tool for the manager
+analyst_tool = AgentTool(agent=analyst_agent)
+
+manager_agent = LlmAgent(
+    name="manager",
+    model="gemini-2.5-pro",
+    description="Orchestrates microscopy analysis workflows and synthesizes reports.",
+    instruction=MANAGER_INSTRUCTION,
+    tools=[analyst_tool]
+)

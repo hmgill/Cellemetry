@@ -1,0 +1,37 @@
+"""
+Data export tools (Excel, CSV, etc.).
+"""
+import os
+from typing import Optional
+from google.adk.tools.tool_context import ToolContext
+
+from ..config.dependencies import get_deps_from_state
+from ..config.schemas import ExportResult
+from ..services import analysis
+
+
+def save_excel_tool(
+    filename: str,
+    cell_stats: Optional[dict] = None,
+    nuc_stats: Optional[dict] = None,
+    spatial_stats: Optional[dict] = None,
+    rel_stats: Optional[dict] = None,
+    tool_context: ToolContext = None
+) -> ExportResult:
+    """
+    Save all statistics to a multi-sheet Excel file.
+    """
+    deps = get_deps_from_state(tool_context.state)
+    
+    # Force filename to be in the correct output directory
+    if not filename.endswith(".xlsx"):
+        filename += ".xlsx"
+    
+    base_name = os.path.basename(filename)
+    full_path = deps.get_output_path(base_name)
+    
+    result_path = analysis.save_stats_to_excel(
+        full_path, cell_stats, nuc_stats, spatial_stats, rel_stats
+    )
+    
+    return ExportResult(excel_path=result_path)
